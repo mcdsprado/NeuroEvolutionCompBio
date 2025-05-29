@@ -1,156 +1,152 @@
-import pygame
-import random
-import neat
-import os
-import math
 
-# Configurações do jogo
-largura_janela = 600
-altura_janela = 600
-tamanho_blocos = 20
+#importar bibliotecas
 
-# Inicialização do Pygame
+import pygame #janela para o jogo
+import numpy as np #importa biblioteca de numeros, vetores e matrizes
+import random #random faz funcoes aleatorias, serve para escolher aleatoriamente pais, fazer mutacoes etc
+import sys #fechar simulacao no x
+
+# Configurações da janela, de simulacao do joguinho
+WIDTH, HEIGHT = 600, 600
+TARGET = np.array([WIDTH // 2, HEIGHT // 2])
+AGENT_RADIUS = 5
+
+## C
+
+N_AGENTS = 50 #quantidade de agentes por geracao
+N_GENERATIONS = 100 #quantidade de geracoes 
+STEPS_PER_AGENT = 100 #cada bolinha pode se mover 100x
+MUTATION_RATE = 0.1 #probabilidade de mudar aleatoriamente os genes (pesos da rede neural) ao gerar um novo agente. - diversidade
+
+#inicializando a parte do joguinho
 pygame.init()
-janela = pygame.display.set_mode((largura_janela, altura_janela))
-pygame.display.set_caption("Snake AI - Neuroevolution")
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Projeto Neuroevolution - computacao bioinspirada")
 
-# Cores
-BRANCO = (255, 255, 255)
-VERDE = (0, 255, 0)
-VERMELHO = (255, 0, 0)
-PRETO = (0, 0, 0)
+clock = pygame.time.Clock()
 
-# Classe da Cobra
-class Cobra:
+# funcao para medir distancia entre dois pontos, a e b posicao entre agente e o alvo.
+#quanto mais proximo do alvo, melhor o agente
+#retorna a distancia entre eles. Usamos isso na avaliacao da aptidão da bolinha
+def distance(a, b):
+    return np.linalg.norm(a - b)
+
+# Classe da rede neural - codificacao genetica da solucao c/ 1 camada escondida
+
+#aqui é criado o cerebro artificial de cada bolinha (Agente). Cria uma classe chamada neuralnetwork. É tipo
+#um molde pra construir diversos cerebros artificiais
+class NeuralNetwork:
     def __init__(self):
-        self.corpo = [[largura_janela // 2, altura_janela // 2]]
-        self.direcao = [0, -tamanho_blocos]
-        self.viva = True
-        self.comida = self.gerar_comida()
-        self.pontuacao = 0
-        self.passos_sem_comer = 0
+        self.w1 = np.random.randn(2, 5) #pesos da entrada para camada escondida
+        self.b1 = np.random.randn(5) #bias da camada escondida
+        self.w2 = np.random.randn(5, 2) #pesos da camada escondida para a saida
+        self.b2 = np.random.randn(2) #bias da saida
 
-    def gerar_comida(self):
-        while True:
-            x = random.randrange(0, largura_janela, tamanho_blocos)
-            y = random.randrange(0, altura_janela, tamanho_blocos)
-            if [x, y] not in self.corpo:
-                return [x, y]
+        #esses sao os genes do agente. cada bolinha nasce com valores diferentes.
+        #genes = determinam o comportamento e a performance. 
 
-    def mover(self):
-        nova_cabeca = [self.corpo[0][0] + self.direcao[0], self.corpo[0][1] + self.direcao[1]]
-        self.corpo.insert(0, nova_cabeca)
-        if nova_cabeca == self.comida:
-            self.pontuacao += 1
-            self.comida = self.gerar_comida()
-            self.passos_sem_comer = 0
-        else:
-            self.corpo.pop()
-            self.passos_sem_comer += 1
+    def forward(self, x):
+        h = np.tanh(np.dot(x, self.w1) + self.b1)
+        out = np.tanh(np.dot(h, self.w2) + self.b2)
+        return out
 
-        # Verifica colisões
-        if (
-            nova_cabeca in self.corpo[1:]
-            or nova_cabeca[0] < 0
-            or nova_cabeca[0] >= largura_janela
-            or nova_cabeca[1] < 0
-            or nova_cabeca[1] >= altura_janela
-            or self.passos_sem_comer > 100
-        ):
-            self.viva = False
+#clonagem - hereditariedade. Cria uma cópia da rede neural atual, para passar os genes adiante durante a reproducao
+#equivale a filhos herdando o dna dos pais
+    def clone(self):
+        clone = NeuralNetwork()
+        clone.w1 = self.w1.copy()
+        clone.b1 = self.b1.copy()
+        clone.w2 = self.w2.copy()
+        clone.b2 = self.b2.copy()
+        return clone
 
-    def desenhar(self, janela):
-        for segmento in self.corpo:
-            pygame.draw.rect(janela, VERDE, (segmento[0], segmento[1], tamanho_blocos, tamanho_blocos))
-        pygame.draw.rect(janela, VERMELHO, (self.comida[0], self.comida[1], tamanho_blocos, tamanho_blocos))
+#mutacao genetica. Para manter diversidade na populacao, permitindo que agentes explorem novos comportamentos.
+    def mutate(self):
+        for param in [self.w1, self.b1, self.w2, self.b2]:
+            mutation_mask = np.random.rand(*param.shape) < MUTATION_RATE
+            param += mutation_mask * np.random.randn(*param.shape) #decide aleatoriamente quais genes serao alterados
 
-    def obter_entrada(self):
-        cabeca = self.corpo[0]
-        dx = self.comida[0] - cabeca[0]
-        dy = self.comida[1] - cabeca[1]
-        distancia_x = dx / largura_janela
-        distancia_y = dy / altura_janela
+# Agente controlado por rede neural
+class Agent:
+    def __init__(self):
+        self.nn = NeuralNetwork()
+        self.reset()
 
-        # Verifica obstáculos nas direções: frente, esquerda, direita
-        esquerda = [self.direcao[1], -self.direcao[0]]
-        direita = [-self.direcao[1], self.direcao[0]]
+    def reset(self):
+        self.pos = np.random.rand(2) * np.array([WIDTH, HEIGHT])
+        self.traj = [self.pos.copy()]
+        self.fitness = 0
 
-        def obstaculo(direcao):
-            pos = [cabeca[0] + direcao[0], cabeca[1] + direcao[1]]
-            if (
-                pos in self.corpo
-                or pos[0] < 0
-                or pos[0] >= largura_janela
-                or pos[1] < 0
-                or pos[1] >= altura_janela
-            ):
-                return 1.0
-            else:
-                return 0.0
+    def update(self):
+        direction = TARGET - self.pos
+        direction /= np.linalg.norm(direction) + 1e-8
+        move = self.nn.forward(direction)
+        self.pos += move * 5
+        self.pos = np.clip(self.pos, [0, 0], [WIDTH, HEIGHT])
+        self.traj.append(self.pos.copy())
 
-        entrada = [
-            distancia_x,
-            distancia_y,
-            obstaculo(self.direcao),
-            obstaculo(esquerda),
-            obstaculo(direita),
-            self.pontuacao / 10.0,
-        ]
-        return entrada
+#funcao de avaliacao - fitness function 
 
-    def atualizar_direcao(self, acao):
-        # Ação: 0 = frente, 1 = esquerda, 2 = direita
-        esquerda = [self.direcao[1], -self.direcao[0]]
-        direita = [-self.direcao[1], self.direcao[0]]
-        if acao == 1:
-            self.direcao = esquerda
-        elif acao == 2:
-            self.direcao = direita
-        # Se acao == 0, mantém a direção atual
+    def evaluate(self):
+        self.fitness = 1 / (distance(self.pos, TARGET) + 1) #mede o desempenho do agente. Quao eficaz ele fez a tarefa de chegar
+        #no alvo = O agente que chegar mais perto do alvo tem maior fitness
 
-# Função principal para avaliação dos genomas
-def avaliar_genomas(genomas, config):
-    for genome_id, genome in genomas:
-        rede = neat.nn.FeedForwardNetwork.create(genome, config)
-        cobra = Cobra()
-        relogio = pygame.time.Clock()
-        tempo = 0
+#selecao natural + nova geracao
 
-        while cobra.viva:
-            pygame.event.pump()
-            entrada = cobra.obter_entrada()
-            saida = rede.activate(entrada)
-            acao = saida.index(max(saida))
-            cobra.atualizar_direcao(acao)
-            cobra.mover()
-            tempo += 1
+def next_generation(agents):
+    agents.sort(key=lambda a: a.fitness, reverse=True) #organiza os agentes do melhor para o pior, de acordo com o fitness
 
-            # Desenho do jogo
-            janela.fill(PRETO)
-            cobra.desenhar(janela)
-            pygame.display.update()
-            relogio.tick(15)
+    best = agents[:N_AGENTS//2] #selecao natural. os melhores vao reproduzi. seleciona a metade superior (melhores 50%)
+    new_agents = []
 
-        # Avaliação da aptidão
-        genome.fitness = cobra.pontuacao * 10 + tempo
+    #reproducao - cruzamento genetico. Escolhe aleatoriamente um dos melhores agentes
+    #cria um filho clonado, com o mesmo cerebro (rede neural)
+    for _ in range(N_AGENTS):
+        parent = random.choice(best)
+        child = Agent()
+        child.nn = parent.nn.clone()
 
-# Função para executar o NEAT
-def executar_neat(config_path):
-    config = neat.config.Config(
-        neat.DefaultGenome,
-        neat.DefaultReproduction,
-        neat.DefaultSpeciesSet,
-        neat.DefaultStagnation,
-        config_path,
-    )
-    populacao = neat.Population(config)
-    populacao.add_reporter(neat.StdOutReporter(True))
-    stats = neat.StatisticsReporter()
-    populacao.add_reporter(stats)
+        #mutacao genética - aplica pequenas mudancas aleatorias nos genes (pesos e bias da rede neural)
 
-    populacao.run(avaliar_genomas, 50)
+        child.nn.mutate()
+        new_agents.append(child) #formacao da nova geracao
 
-if __name__ == "__main__":
-    caminho = os.path.dirname(__file__)
-    caminho_config = os.path.join(caminho, "config-feedforward.txt")
-    executar_neat(caminho_config)
+    return new_agents
+
+# Criar uma população inicial:
+agents = [Agent() for _ in range(N_AGENTS)]
+generation = 0
+
+while generation < N_GENERATIONS:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            sys.exit()
+
+#avaliacao e evolucao da geracao
+
+    for agent in agents:
+        agent.reset()
+
+    for _ in range(STEPS_PER_AGENT):
+        screen.fill((30, 30, 30))
+        pygame.draw.circle(screen, (255, 0, 0), TARGET.astype(int), 8)
+
+        for agent in agents:
+            agent.update()
+            pygame.draw.circle(screen, (0, 255, 0), agent.pos.astype(int), AGENT_RADIUS)
+
+        pygame.display.flip()
+        clock.tick(60)
+
+
+    for agent in agents:
+        agent.evaluate()
+
+
+    best = max(agents, key=lambda a: a.fitness)
+    print(f"Geração {generation} - Melhor distância: {1 / best.fitness:.2f}")
+
+ 
+    agents = next_generation(agents)
+    generation += 1
